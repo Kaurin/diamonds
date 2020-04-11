@@ -3,6 +3,8 @@ import zmq
 import simplejson
 import boto3
 import sys, os, datetime, time
+import rfc3339
+import iso8601
 
 session = boto3.Session(region_name="eu-west-1")
 sns_client = session.client("sns")
@@ -12,17 +14,15 @@ sns_client = session.client("sns")
 """
 __relayEDDN = "tcp://eddn.edcd.io:9500"
 __timeoutEDDN = 600000
+__recieveText = False
+__mobileNum = "+1CHANGEME"
+__minPrice = 1
+__minDemand = 1
+__stationMap = {}
+__savedStationsExpiryHours = 6
 
 # Set False to listen to production stream
 __debugEDDN = False
-
-# Set to False if you do not want verbose logging
-# __logVerboseFile = os.path.dirname(__file__) + "/Logs_Verbose_EDDN_%DATE%.htm"
-__logVerboseFile = False
-
-# Set to False if you do not want JSON logging
-# __logJSONFile = os.path.dirname(__file__) + "/Logs_JSON_EDDN_%DATE%.log"
-__logJSONFile = False
 
 # A sample list of authorised softwares
 __authorisedSoftwares = [
@@ -36,6 +36,7 @@ __authorisedSoftwares = [
     "RegulatedNoise",
     "RegulatedNoise__DJ",
     "E:D Market Connector [Windows]",
+    "E:D Market Connector [Linux]",
     "EliteLogAgent",
 ]
 
@@ -48,26 +49,48 @@ __excludedSoftwares = ["My Awesome Market Uploader"]
 """
 
 
-def date(__format):
-    d = datetime.datetime.utcnow()
-    return d.strftime(__format)
+def sendSMS(message):
+    response = sns_client.publish(
+        PhoneNumber=__mobileNum,
+        Message=message,
+        MessageAttributes={
+            "AWS.SNS.SMS.SenderID": {"DataType": "String", "StringValue": "Diamonds",},
+            "AWS.SNS.SMS.SMSType": {
+                "DataType": "String",
+                "StringValue": "Transactional",
+            },
+        },
+    )
+    print(response)
 
 
-__oldTime = False
+def get_date_object(date_string):
+    return iso8601.parse_date(date_string)
 
 
-def printJSON(__json):
-    global __logJSONFile
+def get_date_string(date_object):
+    return rfc3339.rfc3339(date_object)
 
-    if __logJSONFile != False:
-        __logJSONFileParsed = __logJSONFile.replace("%DATE%", str(date("%Y-%m-%d")))
 
-        f = open(__logJSONFileParsed, "a")
-        f.write(str(__json) + "\n")
-        f.close()
+def shouldIText(message):
+    uniqueName = message["systemName"] + "__" + message["stationName"]
+    timestamp = get_date_object(message["timestamp"])
+    if uniqueName not in __stationMap:
+        __stationMap[uniqueName] = timestamp
+        return True
+    fetchedDateTime = __stationMap.get(uniqueName)
+    if fetchedDateTime + datetime.timedelta(
+        hours=__savedStationsExpiryHours
+    ) < datetime.datetime.now(datetime.timezone.utc):
+        __stationMap[uniqueName] = timestamp
+        return True
+
+    return False
 
 
 def main():
+    print("Sending test SMS")
+    sendSMS("Started EDDN Subscriber")
     print("Starting EDDN Subscriber")
     print("")
 
@@ -112,7 +135,6 @@ def main():
                 ] == "https://eddn.edcd.io/schemas/commodity/1" + (
                     "/test" if (__debugEDDN == True) else ""
                 ):
-                    printJSON(__message)
                     print("Receiving commodity-v1 message...")
                     print("    - Converting to v3...")
 
@@ -162,8 +184,8 @@ def main():
                     "/test" if (__debugEDDN == True) else ""
                 ):
                     if __converted == False:
-                        printJSON(__message)
                         # print("Receiving commodity-v3 message...")
+                        pass
 
                     __authorised = False
                     __excluded = False
@@ -183,26 +205,12 @@ def main():
                         print("EXCLUDED" if (__excluded == True) else "UNAUTHORISED")
 
                     if __authorised == True and __excluded == False:
-                        # Do what you want with the data...
-                        # Have fun !
-
-                        # For example
-                        # print("    - Timestamp: " + __json["message"]["timestamp"])
-                        # print("    - Uploader ID: " + __json["header"]["uploaderID"])
-                        # print(
-                        #     "        - System Name: " + __json["message"]["systemName"]
-                        # )
-                        # print(
-                        #     "        - Station Name: "
-                        #     + __json["message"]["stationName"]
-                        # )
-
                         for __commodity in __json["message"]["commodities"]:
                             if __commodity["name"] != "lowtemperaturediamond":
                                 continue
-                            if __commodity["demand"] < 1:
+                            if __commodity["demand"] < __minDemand:
                                 continue
-                            if __commodity["sellPrice"] < 1:
+                            if __commodity["sellPrice"] < __minPrice:
                                 continue
                             print(
                                 "        - System Name: "
@@ -212,20 +220,6 @@ def main():
                                 "        - Station Name: "
                                 + __json["message"]["stationName"]
                             )
-                            # print("            - Name: " + __commodity["name"])
-                            # print(
-                            #     "                - Buy Price: "
-                            #     + str(__commodity["buyPrice"])
-                            # )
-                            # print(
-                            #     "                - Supply: "
-                            #     + str(__commodity["supply"])
-                            #     + (
-                            #         (" (" + __commodity["supplyLevel"] + ")")
-                            #         if "supplyLevel" in __commodity
-                            #         else ""
-                            #     )
-                            # )
                             print(
                                 "                - Sell Price: "
                                 + str(__commodity["sellPrice"])
@@ -239,31 +233,16 @@ def main():
                                     else ""
                                 )
                             )
-                            text = False
-                            if text:
-                                response = sns_client.publish(
-                                    PhoneNumber="+353873820744",
-                                    Message=f'System: {__json["message"]["systemName"]}, Station: {__json["message"]["stationName"]}, SellPrice: {__commodity["sellPrice"]}, Demand: {__commodity["demand"]}',
-                                    MessageAttributes={
-                                        "AWS.SNS.SMS.SenderID": {
-                                            "DataType": "String",
-                                            "StringValue": "Diamonds",
-                                        },
-                                        "AWS.SNS.SMS.SMSType": {
-                                            "DataType": "String",
-                                            "StringValue": "Transactional",
-                                        },
-                                    },
+                            print(shouldIText(__json["message"]))
+                            if __recieveText:
+                                sendSMS(
+                                    f'System: {__json["message"]["systemName"]}, Station: {__json["message"]["stationName"]}, SellPrice: {__commodity["sellPrice"]}, Demand: {__commodity["demand"]}'
                                 )
-                                print(response)
+                                pass
                             break
                         # End example
 
                     del __authorised, __excluded
-
-                    # print("")
-                    # print("")
-
                 else:
                     # print("Unknown schema: " + __json["$schemaRef"])
                     pass
@@ -271,6 +250,7 @@ def main():
                 del __converted
 
         except zmq.ZMQError as e:
+            sendSMS("Something went wrong!")
             print("")
             print("ZMQSocketException: " + str(e))
             subscriber.disconnect(__relayEDDN)

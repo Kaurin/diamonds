@@ -9,6 +9,8 @@ verify_ssl = true
 pyzmq = "*"
 boto3 = "*"
 simplejson = "*"
+rfc3339 = "*"
+iso8601 = "*"
 
 [requires]
 python_version = "3.7"
